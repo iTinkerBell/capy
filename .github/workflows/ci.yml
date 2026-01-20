@@ -1,4 +1,5 @@
 #
+# Copyright (c) 2025 Will Pak
 # Copyright (c) 2023 Christian Mazakas
 # Copyright (c) 2023 Alan de Freitas
 # Copyright (c) 2021-2023 Sam Darwin
@@ -261,6 +262,47 @@ jobs:
         with:
           path: capy-root
 
+      # Cache APT archives for containers to avoid re-downloading 297MB of compiler packages
+      # Uses workspace path since /var/cache/apt is inside the container (not accessible to actions/cache on host)
+      - name: Cache APT Archives (Container)
+        uses: actions/cache@v4
+        if: ${{ matrix.container != '' }}
+        id: cache-apt-archives
+        with:
+          path: .apt-cache
+          key: ${{ matrix.container }}-apt-archives-${{ matrix.compiler }}-${{ matrix.version }}-v4
+          restore-keys: |
+            ${{ matrix.container }}-apt-archives-${{ matrix.compiler }}-${{ matrix.version }}-
+            ${{ matrix.container }}-apt-archives-${{ matrix.compiler }}-
+            ${{ matrix.container }}-apt-archives-
+          save-always: true
+
+      - name: Restore APT Cache (Container)
+        if: ${{ matrix.container != '' }}
+        run: |
+          echo "=== APT Cache Debug ==="
+          echo "Cache hit: ${{ steps.cache-apt-archives.outputs.cache-hit }}"
+          echo "Cache key: ${{ matrix.container }}-apt-archives-${{ matrix.compiler }}-${{ matrix.version }}-v4"
+          ls -la .apt-cache/ 2>/dev/null || echo ".apt-cache directory does not exist yet"
+
+          # Disable APT auto-clean so .deb files are kept after install
+          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/99keep-debs
+          rm -f /etc/apt/apt.conf.d/docker-clean 2>/dev/null || true
+
+          # Restore cached packages if available
+          if [ "${{ steps.cache-apt-archives.outputs.cache-hit }}" = "true" ]; then
+            echo "Cache HIT - restoring packages..."
+            if [ -d ".apt-cache" ] && [ "$(ls -A .apt-cache/*.deb 2>/dev/null)" ]; then
+              mkdir -p /var/cache/apt/archives/partial
+              cp .apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
+              echo "Restored $(ls -1 /var/cache/apt/archives/*.deb 2>/dev/null | wc -l) .deb files"
+            else
+              echo "WARNING: Cache hit but .apt-cache is empty!"
+            fi
+          else
+            echo "Cache MISS - packages will be downloaded fresh"
+          fi
+
       - name: Setup C++
         uses: alandefreitas/cpp-actions/setup-cpp@v1.9.0
         id: setup-cpp
@@ -269,6 +311,24 @@ jobs:
           version: ${{ matrix.version }}
           check-latest: true
           trace-commands: true
+
+      - name: Save APT Cache (Container)
+        if: ${{ matrix.container != '' && steps.cache-apt-archives.outputs.cache-hit != 'true' }}
+        run: |
+          echo "Saving APT packages for future cache..."
+          mkdir -p .apt-cache
+          deb_count=$(ls -1 /var/cache/apt/archives/*.deb 2>/dev/null | wc -l)
+          echo "Available .deb files in /var/cache/apt/archives/: $deb_count"
+          cp /var/cache/apt/archives/*.deb .apt-cache/ 2>/dev/null || true
+          echo "Cached $(ls -1 .apt-cache/*.deb 2>/dev/null | wc -l) .deb files totaling $(du -sh .apt-cache 2>/dev/null | cut -f1 || echo '0')"
+
+      # Cache APT packages to speed up package installation (Linux only)
+      - name: Cache APT Packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        if: ${{ startsWith(matrix.runs-on, 'ubuntu') && matrix.container == '' }}
+        with:
+          packages: build-essential zlib1g-dev libbrotli-dev ${{ matrix.install }}
+          version: 1.0
 
       - name: Install packages
         uses: alandefreitas/cpp-actions/package-install@v1.9.0
@@ -326,6 +386,18 @@ jobs:
           # Patch boost-root with workspace module
           cp -r "$workspace_root"/capy-root "libs/$module"
 
+      # Cache B2 build artifacts to speed up incremental builds
+      - name: Cache B2 Build
+        uses: actions/cache@v4
+        id: cache-b2
+        with:
+          path: boost-root/bin.v2
+          key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-${{ hashFiles('capy-root/src/**', 'capy-root/include/**') }}
+          restore-keys: |
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-
+
       - name: Boost B2 Workflow
         uses: alandefreitas/cpp-actions/b2-workflow@v1.9.0
         if: ${{ !matrix.coverage && !matrix.time-trace }}
@@ -346,6 +418,18 @@ jobs:
           cxxflags: ${{ (matrix.asan && '-fsanitize-address-use-after-scope -fsanitize=pointer-subtract') || '' }}
           stop-on-error: true
           extra-args: ${{ (matrix.valgrind && 'testing.launcher=valgrind' || '' )}}
+
+      # Cache CMake build artifacts
+      - name: Cache CMake Build
+        uses: actions/cache@v4
+        if: ${{ matrix.coverage || matrix.time-trace || matrix.build-cmake || matrix.is-earliest }}
+        id: cache-cmake
+        with:
+          path: __build_cmake_test__
+          key: ${{ runner.os }}-cmake-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ hashFiles('capy-root/src/**', 'capy-root/include/**', 'capy-root/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-
+            ${{ runner.os }}-cmake-${{ matrix.compiler }}-${{ matrix.version }}-
 
       - name: Boost CMake Workflow
         uses: alandefreitas/cpp-actions/cmake-workflow@v1.9.0
@@ -578,6 +662,17 @@ jobs:
         with:
           node-version: 18
 
+      # Cache npm dependencies for Antora build
+      - name: Cache npm
+        uses: actions/cache@v4
+        id: cache-npm-antora
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-antora-${{ hashFiles('capy-root/doc/package-lock.json', 'capy-root/doc/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-antora-
+            ${{ runner.os }}-npm-
+
       - name: Build Antora Docs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -602,3 +697,4 @@ jobs:
         with:
           name: antora-docs
           path: boost-root/libs/capy/doc/build/site
+
