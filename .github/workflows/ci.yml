@@ -312,6 +312,17 @@ jobs:
           check-latest: true
           trace-commands: true
 
+      # Setup sccache for CMake builds to speed up compilation
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+
       - name: Save APT Cache (Container)
         if: ${{ matrix.container != '' && steps.cache-apt-archives.outputs.cache-hit != 'true' }}
         run: |
@@ -387,11 +398,16 @@ jobs:
           cp -r "$workspace_root"/capy-root "libs/$module"
 
       # Cache B2 build artifacts to speed up incremental builds
+      # Caches: B2 executable, build artifacts (bin.v2), and generated headers
       - name: Cache B2 Build
         uses: actions/cache@v4
         id: cache-b2
         with:
-          path: boost-root/bin.v2
+          path: |
+            boost-root/b2
+            boost-root/b2.exe
+            boost-root/bin.v2
+            boost-root/boost
           key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-${{ hashFiles('capy-root/src/**', 'capy-root/include/**') }}
           restore-keys: |
             ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-
@@ -453,6 +469,8 @@ jobs:
           extra-args: |
             -D Boost_VERBOSE=ON
             -D BOOST_INCLUDE_LIBRARIES="${{ steps.patch.outputs.module }}"
+            -D CMAKE_C_COMPILER_LAUNCHER=sccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=sccache
           export-compile-commands: ${{ matrix.time-trace }}
           package: false
           package-artifact: false
@@ -487,6 +505,8 @@ jobs:
           extra-args: |
             -D BOOST_CI_INSTALL_TEST=ON
             -D CMAKE_PREFIX_PATH=${{ steps.patch.outputs.workspace_root }}/.local
+            -D CMAKE_C_COMPILER_LAUNCHER=sccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=sccache
           ref-source-dir: boost-root/libs/capy
           trace-commands: true
 
@@ -507,7 +527,10 @@ jobs:
           shared: ${{ matrix.shared }}
           install: false
           cmake-version: '>=3.15'
-          extra-args: -D BOOST_CI_INSTALL_TEST=OFF
+          extra-args: |
+            -D BOOST_CI_INSTALL_TEST=OFF
+            -D CMAKE_C_COMPILER_LAUNCHER=sccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=sccache
           ref-source-dir: boost-root/libs/capy/test/cmake_test
 
       - name: Root Project CMake Workflow
@@ -529,6 +552,9 @@ jobs:
           cxxflags: ${{ matrix.cxxflags }}
           shared: ${{ matrix.shared }}
           cmake-version: '>=3.20'
+          extra-args: |
+            -D CMAKE_C_COMPILER_LAUNCHER=sccache
+            -D CMAKE_CXX_COMPILER_LAUNCHER=sccache
           package: false
           package-artifact: false
           ref-source-dir: boost-root
