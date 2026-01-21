@@ -724,4 +724,3 @@ jobs:
         with:
           name: antora-docs
           path: boost-root/libs/capy/doc/build/site
-
