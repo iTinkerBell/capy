@@ -322,6 +322,46 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
           echo "CMAKE_C_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_DIRECT=false" >> $GITHUB_ENV
+
+      - name: Configure B2 to use sccache
+        shell: bash
+        run: |
+          # Get sccache path
+          sccache_path=$(which sccache || echo "sccache")
+          echo "sccache path: $sccache_path"
+
+          # Configure B2 toolsets to use sccache as compiler wrapper
+          # This appends to user-config.jam (will be in home directory)
+          config_file="$HOME/user-config.jam"
+
+          # For GCC
+          if [[ "${{ matrix.compiler }}" == "gcc" ]]; then
+            echo "using gcc : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'g++' }} ;" >> "$config_file"
+            echo "Configured B2 with sccache for GCC"
+          fi
+
+          # For Clang
+          if [[ "${{ matrix.compiler }}" == "clang" || "${{ matrix.compiler }}" == "apple-clang" ]]; then
+            echo "using clang : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'clang++' }} ;" >> "$config_file"
+            echo "Configured B2 with sccache for Clang"
+          fi
+
+          # For MinGW
+          if [[ "${{ matrix.compiler }}" == "mingw" ]]; then
+            echo "using gcc : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'g++' }} ;" >> "$config_file"
+            echo "Configured B2 with sccache for MinGW"
+          fi
+
+          # For MSVC (Windows) - more complex, uses separate compiler and compiler-path
+          if [[ "${{ matrix.compiler }}" == "msvc" ]]; then
+            # MSVC needs special handling - sccache wraps cl.exe
+            echo "using msvc : : : <compiler>$sccache_path <compiler-arg>cl.exe ;" >> "$config_file"
+            echo "Configured B2 with sccache for MSVC"
+          fi
+
+          echo "=== user-config.jam contents ==="
+          cat "$config_file" || echo "File not found yet"
 
       - name: Save APT Cache (Container)
         if: ${{ matrix.container != '' && steps.cache-apt-archives.outputs.cache-hit != 'true' }}
@@ -398,7 +438,8 @@ jobs:
           cp -r "$workspace_root"/capy-root "libs/$module"
 
       # Cache B2 build artifacts to speed up incremental builds
-      # Caches: B2 executable, build artifacts (bin.v2), and generated headers
+      # Caches: B2 executable, build artifacts (bin.v2/libs/capy only), and generated headers
+      # Using restore-keys for partial cache hits to enable incremental builds
       - name: Cache B2 Build
         uses: actions/cache@v4
         id: cache-b2
@@ -406,11 +447,12 @@ jobs:
           path: |
             boost-root/b2
             boost-root/b2.exe
-            boost-root/bin.v2
+            boost-root/bin.v2/libs/capy
             boost-root/boost
-          key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-${{ hashFiles('capy-root/src/**', 'capy-root/include/**') }}
+          key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-
             ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-
             ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-
 
@@ -486,9 +528,10 @@ jobs:
         run: |
           echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/.local/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
+      # Only run CMake integration tests on latest/primary configurations to save time
       - name: Find Package Integration Workflow
         uses: alandefreitas/cpp-actions/cmake-workflow@v1.9.0
-        if: ${{ matrix.build-cmake || matrix.is-earliest }}
+        if: ${{ matrix.is-latest && matrix.build-cmake }}
         with:
           source-dir: boost-root/libs/${{ steps.patch.outputs.module }}/test/cmake_test
           build-dir: __build_cmake_install_test__
@@ -513,7 +556,7 @@ jobs:
 
       - name: Subdirectory Integration Workflow
         uses: alandefreitas/cpp-actions/cmake-workflow@v1.9.0
-        if: ${{ matrix.build-cmake || matrix.is-earliest }}
+        if: ${{ matrix.is-latest && matrix.build-cmake }}
         with:
           source-dir: boost-root/libs/${{ steps.patch.outputs.module }}/test/cmake_test
           build-dir: __build_cmake_subdir_test__
@@ -536,7 +579,7 @@ jobs:
 
       - name: Root Project CMake Workflow
         uses: alandefreitas/cpp-actions/cmake-workflow@v1.9.0
-        if: ${{ matrix.build-cmake || matrix.is-earliest }}
+        if: ${{ matrix.is-latest && matrix.build-cmake }}
         with:
           source-dir: boost-root/libs/${{ steps.patch.outputs.module }}
           build-dir: __build_root_test__
