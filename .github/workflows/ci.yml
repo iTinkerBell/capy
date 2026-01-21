@@ -446,6 +446,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cmake-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-
             ${{ runner.os }}-cmake-${{ matrix.compiler }}-${{ matrix.version }}-
+          save-always: true
 
       - name: Boost CMake Workflow
         uses: alandefreitas/cpp-actions/cmake-workflow@v1.9.0
