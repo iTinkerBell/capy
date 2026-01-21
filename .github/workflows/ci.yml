@@ -325,43 +325,60 @@ jobs:
           echo "SCCACHE_DIRECT=false" >> $GITHUB_ENV
 
       - name: Configure B2 to use sccache
+        id: configure-b2-sccache
         shell: bash
         run: |
-          # Get sccache path
+          # Get sccache path and normalize for B2
           sccache_path=$(which sccache || echo "sccache")
-          echo "sccache path: $sccache_path"
+          echo "sccache path (raw): $sccache_path"
 
-          # Configure B2 toolsets to use sccache as compiler wrapper
-          # This appends to user-config.jam (will be in home directory)
-          config_file="$HOME/user-config.jam"
+          # Get compiler path
+          compiler_path="${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'g++' }}"
+          echo "compiler path (raw): $compiler_path"
+
+          # On Windows, convert paths to Windows format and escape backslashes for B2
+          if [[ "${{ runner.os }} " == "Windows" ]]; then
+            # Convert /c/path to C:\path and escape backslashes
+            sccache_path=$(echo "$sccache_path" | sed 's|^/\([a-z]\)/|\U\1:/|' | sed 's|/|\\|g' | sed 's|\\|\\\\|g')
+            # Escape backslashes in compiler path for B2
+            compiler_path=$(echo "$compiler_path" | sed 's|\\|\\\\|g')
+            echo "sccache path (Windows): $sccache_path"
+            echo "compiler path (Windows): $compiler_path"
+          fi
+
+          # Create user-config.jam in workspace that will be passed to b2-workflow
+          # For Windows, this file is added to by "Patch user-config.jam (Windows)" step later
+          workspace_root=$(echo "$GITHUB_WORKSPACE" | sed 's/\\/\//g')
+          config_file="$workspace_root/user-config-sccache.jam"
 
           # For GCC
           if [[ "${{ matrix.compiler }}" == "gcc" ]]; then
-            echo "using gcc : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'g++' }} ;" >> "$config_file"
+            echo "using gcc : : \"$sccache_path\" \"$compiler_path\" ;" > "$config_file"
             echo "Configured B2 with sccache for GCC"
           fi
 
           # For Clang
           if [[ "${{ matrix.compiler }}" == "clang" || "${{ matrix.compiler }}" == "apple-clang" ]]; then
-            echo "using clang : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'clang++' }} ;" >> "$config_file"
+            echo "using clang : : \"$sccache_path\" \"$compiler_path\" ;" > "$config_file"
             echo "Configured B2 with sccache for Clang"
           fi
 
           # For MinGW
           if [[ "${{ matrix.compiler }}" == "mingw" ]]; then
-            echo "using gcc : : $sccache_path ${{ steps.setup-cpp.outputs.cxx || matrix.cxx || 'g++' }} ;" >> "$config_file"
+            echo "using gcc : : \"$sccache_path\" \"$compiler_path\" ;" > "$config_file"
             echo "Configured B2 with sccache for MinGW"
           fi
 
-          # For MSVC (Windows) - more complex, uses separate compiler and compiler-path
+          # For MSVC (Windows) - will be extended by later step for zlib/brotli
           if [[ "${{ matrix.compiler }}" == "msvc" ]]; then
             # MSVC needs special handling - sccache wraps cl.exe
-            echo "using msvc : : : <compiler>$sccache_path <compiler-arg>cl.exe ;" >> "$config_file"
+            echo "using msvc : : : <compiler>\"$sccache_path\" <compiler-arg>cl.exe ;" > "$config_file"
             echo "Configured B2 with sccache for MSVC"
           fi
 
-          echo "=== user-config.jam contents ==="
+          echo "=== user-config-sccache.jam contents ==="
           cat "$config_file" || echo "File not found yet"
+          echo "user_config_path=$config_file" >> $GITHUB_OUTPUT
 
       - name: Save APT Cache (Container)
         if: ${{ matrix.container != '' && steps.cache-apt-archives.outputs.cache-hit != 'true' }}
@@ -400,6 +417,40 @@ jobs:
           scan-modules-dir: capy-root
           scan-modules-ignore: capy
 
+      - name: Install Packages (Windows)
+        uses: alandefreitas/cpp-actions/package-install@v1.9.0
+        if: ${{ startsWith(matrix.runs-on, 'windows') }}
+        id: package-install-windows
+        with:
+          vcpkg: zlib brotli
+          vcpkg-dir: vcpkg-root
+          vcpkg-triplet: ${{ matrix.x86 && 'x86-windows-static' || 'x64-windows' }}
+
+      - name: Patch user-config.jam (Windows)
+        id: patch-user-config
+        shell: bash
+        if: ${{ startsWith(matrix.runs-on, 'windows') }}
+        run: |
+          set -xe
+          home=$(pwd)
+
+          triplet=${{ matrix.x86 && 'x86-windows-static' || 'x64-windows' }}
+          addrmdl=${{ matrix.x86 && '32' || '64' }}
+
+          # Append to the sccache user-config.jam created earlier
+          config_file="${{ steps.configure-b2-sccache.outputs.user_config_path }}"
+
+          # This is temporary until we move capy/build/brotli.jam to boost/tools/build
+          echo "import-search ${home}/boost-root/libs/capy/build ;" | sed 's/\/d\//D:\//g' >> "$config_file"
+
+          echo "using zlib   : : <include>\"${home}/vcpkg-root/installed/${triplet}/include\" <search>\"${home}/vcpkg-root/installed/${triplet}/lib\" <dll-path>\"${home}/vcpkg-root/installed/${triplet}/bin\" <name>zlib : <address-model>${addrmdl} ;" | sed 's/\/d\//D:\//g' >> "$config_file"
+          echo "using brotli : : <include>\"${home}/vcpkg-root/installed/${triplet}/include\" <search>\"${home}/vcpkg-root/installed/${triplet}/lib\" <dll-path>\"${home}/vcpkg-root/installed/${triplet}/bin\"            : <address-model>${addrmdl} ;" | sed 's/\/d\//D:\//g' >> "$config_file"
+
+          cat "$config_file"
+
+          toolchain=$(echo "$GITHUB_WORKSPACE/vcpkg-root/scripts/buildsystems/vcpkg.cmake" | sed 's/\/d\//D:\//g' )
+          echo "toolchain=${toolchain}" >> $GITHUB_OUTPUT
+
       - name: ASLR Fix
         if: ${{ startsWith(matrix.runs-on, 'ubuntu' )}}
         run: |
@@ -437,9 +488,33 @@ jobs:
           # Patch boost-root with workspace module
           cp -r "$workspace_root"/capy-root "libs/$module"
 
+      # Compute cache keys based on boost superproject and submodules
+      - name: Compute Boost Hashes for Caching
+        id: boost-hashes
+        shell: bash
+        run: |
+          cd boost-root
+
+          # Get boost superproject commit hash
+          boost_hash=$(git rev-parse HEAD)
+          echo "boost_hash=$boost_hash"
+          echo "boost_hash=$boost_hash" >> $GITHUB_OUTPUT
+
+          # Get boost.build submodule hash (needed for b2 executable caching)
+          boost_build_hash=$(git -C tools/build rev-parse HEAD 2>/dev/null || echo "none")
+          echo "boost_build_hash=$boost_build_hash"
+          echo "boost_build_hash=$boost_build_hash" >>$GITHUB_OUTPUT
+
+          # Get hash of all submodules except capy (affects build artifacts)
+          # This creates a composite hash of all dependency submodules
+          submodules_hash=$(git submodule status | grep -v "libs/capy" | git hash-object --stdin || echo "none")
+          echo "submodules_hash=$submodules_hash"
+          echo "submodules_hash=$submodules_hash" >> $GITHUB_OUTPUT
+
       # Cache B2 build artifacts to speed up incremental builds
       # Caches: B2 executable, build artifacts (bin.v2/libs/capy only), and generated headers
-      # Using restore-keys for partial cache hits to enable incremental builds
+      # Cache key uses boost superproject + boost.build hashes for b2 executable
+      # and submodules hash for build artifacts
       - name: Cache B2 Build
         uses: actions/cache@v4
         id: cache-b2
@@ -449,12 +524,12 @@ jobs:
             boost-root/b2.exe
             boost-root/bin.v2/libs/capy
             boost-root/boost
-          key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-${{ github.sha }}
+          key: ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-boost-${{ steps.boost-hashes.outputs.boost_hash }}-build-${{ steps.boost-hashes.outputs.boost_build_hash }}-deps-${{ steps.boost-hashes.outputs.submodules_hash }}-capy-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-boost-${{ steps.boost-hashes.outputs.boost_hash }}-build-${{ steps.boost-hashes.outputs.boost_build_hash }}-deps-${{ steps.boost-hashes.outputs.submodules_hash }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-boost-${{ steps.boost-hashes.outputs.boost_hash }}-build-${{ steps.boost-hashes.outputs.boost_build_hash }}-
+            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-${{ matrix.asan && 'asan' || '' }}${{ matrix.ubsan && 'ubsan' || '' }}-boost-${{ steps.boost-hashes.outputs.boost_hash }}-
             ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-${{ matrix.build-type }}-
-            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-${{ matrix.latest-cxxstd }}-
-            ${{ runner.os }}-b2-${{ matrix.compiler }}-${{ matrix.version }}-
 
       - name: Boost B2 Workflow
         uses: iTinkerBell/cpp-actions/b2-workflow@skip_boostrap
@@ -474,6 +549,7 @@ jobs:
           shared: ${{ matrix.shared }}
           rtti: on
           cxxflags: ${{ (matrix.asan && '-fsanitize-address-use-after-scope -fsanitize=pointer-subtract') || '' }}
+          user-config: ${{ steps.configure-b2-sccache.outputs.user_config_path }}
           stop-on-error: true
           extra-args: ${{ (matrix.valgrind && 'testing.launcher=valgrind' || '' )}}
 
