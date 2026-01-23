@@ -416,40 +416,6 @@ jobs:
           scan-modules-dir: capy-root
           scan-modules-ignore: capy
 
-      - name: Install Packages (Windows)
-        uses: alandefreitas/cpp-actions/package-install@v1.9.0
-        if: ${{ startsWith(matrix.runs-on, 'windows') }}
-        id: package-install-windows
-        with:
-          vcpkg: zlib brotli
-          vcpkg-dir: vcpkg-root
-          vcpkg-triplet: ${{ matrix.x86 && 'x86-windows-static' || 'x64-windows' }}
-
-      - name: Patch user-config.jam (Windows)
-        id: patch-user-config
-        shell: bash
-        if: ${{ startsWith(matrix.runs-on, 'windows') }}
-        run: |
-          set -xe
-          home=$(pwd)
-
-          triplet=${{ matrix.x86 && 'x86-windows-static' || 'x64-windows' }}
-          addrmdl=${{ matrix.x86 && '32' || '64' }}
-
-          # Append to the sccache user-config.jam created earlier
-          config_file="${{ steps.configure-b2-sccache.outputs.user_config_path }}"
-
-          # This is temporary until we move capy/build/brotli.jam to boost/tools/build
-          echo "import-search ${home}/boost-root/libs/capy/build ;" | sed 's/\/d\//D:\//g' >> "$config_file"
-
-          echo "using zlib   : : <include>\"${home}/vcpkg-root/installed/${triplet}/include\" <search>\"${home}/vcpkg-root/installed/${triplet}/lib\" <dll-path>\"${home}/vcpkg-root/installed/${triplet}/bin\" <name>zlib : <address-model>${addrmdl} ;" | sed 's/\/d\//D:\//g' >> "$config_file"
-          echo "using brotli : : <include>\"${home}/vcpkg-root/installed/${triplet}/include\" <search>\"${home}/vcpkg-root/installed/${triplet}/lib\" <dll-path>\"${home}/vcpkg-root/installed/${triplet}/bin\"            : <address-model>${addrmdl} ;" | sed 's/\/d\//D:\//g' >> "$config_file"
-
-          cat "$config_file"
-
-          toolchain=$(echo "$GITHUB_WORKSPACE/vcpkg-root/scripts/buildsystems/vcpkg.cmake" | sed 's/\/d\//D:\//g' )
-          echo "toolchain=${toolchain}" >> $GITHUB_OUTPUT
-
       - name: ASLR Fix
         if: ${{ startsWith(matrix.runs-on, 'ubuntu' )}}
         run: |
